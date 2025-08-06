@@ -336,5 +336,167 @@ cnpy::NpyArray cnpy::npy_load(std::string fname) {
     return arr;
 }
 
+void cnpy::npz_save_string(std::string zipname, std::string fname, void* data, const std::vector<size_t>& str_lens, std::string mode )
+{
+  //first, append a .npy to the fname
+  fname += ".npy";
+
+  //now, on with the show
+  FILE* fp = NULL;
+  uint16_t nrecs = 0;
+  size_t global_header_offset = 0;
+  std::vector<char> global_header;
+
+  if(mode == "a") fp = fopen(zipname.c_str(),"r+b");
+
+  if(fp) {
+    //zip file exists. we need to add a new npy file to it.
+    //first read the footer. this gives us the offset and size of the global header
+    //then read and store the global header.
+    //below, we will write the the new data at the start of the global header then append the global header and footer below it
+    size_t global_header_size;
+    parse_zip_footer(fp,nrecs,global_header_size,global_header_offset);
+    fseek(fp,global_header_offset,SEEK_SET);
+    global_header.resize(global_header_size);
+    size_t res = fread(&global_header[0],sizeof(char),global_header_size,fp);
+    if(res != global_header_size){
+      throw std::runtime_error("npz_save: header read error while adding to existing zip");
+    }
+    fseek(fp,global_header_offset,SEEK_SET);
+  }
+  else {
+    fp = fopen(zipname.c_str(),"wb");
+  }
+
+  std::vector<char> npy_header = create_string_npy_header(str_lens);
+
+
+  size_t max_len = *std::max_element(str_lens.begin(), str_lens.end());
+  size_t nels = str_lens.size();
+  size_t total_bytes = nels * max_len;
+  size_t nbytes = total_bytes + npy_header.size();
+
+  size_t current_pos = 0;
+  std::vector<std::string> fixed_buffer;
+  for (int i = 0; i < str_lens.size(); ++i) {
+    std::string padding_str(static_cast<char*>(data + current_pos), str_lens[i]);
+    if (padding_str.length() < max_len) {
+      padding_str.append(max_len - padding_str.length(), ' '); // 用空格填充
+    }
+    fixed_buffer.emplace_back(padding_str);
+    current_pos += str_lens[i];
+  }
+  std::vector<char> raw_data;
+  for (const auto& str : fixed_buffer) {
+    raw_data.insert(raw_data.end(), str.begin(), str.end());
+  }
+
+  //get the CRC of the data to be added
+  uint32_t crc = crc32(0L,(uint8_t*)&npy_header[0],npy_header.size());
+  if(total_bytes>0) {
+    crc = crc32(crc, (uint8_t*)raw_data.data(), total_bytes);
+  }
+
+  //build the local header
+  std::vector<char> local_header;
+  local_header.insert(local_header.end(), {'P', 'K', 0x03, 0x04});
+  local_header += (uint16_t) 20; //min version to extract
+  local_header += (uint16_t) 0; //reserve +  bit flag
+  local_header += (uint16_t) 0; //compression method，对应zip ZIP_STORED = 0
+  local_header += (uint16_t) 0; //dostime
+  local_header += (uint16_t) 0; //dosdate
+  local_header += (uint32_t) crc; //crc
+  local_header += (uint32_t) nbytes; //compressed size
+  local_header += (uint32_t) nbytes; //uncompressed size
+  local_header += (uint16_t) fname.size(); //fname length
+  local_header += (uint16_t) 0; //extra field length
+  local_header += fname;
+
+  //build global header
+  global_header += "PK"; //first part of sig
+  global_header += (uint16_t) 0x0201; //second part of sig
+  global_header += (uint16_t) 20; //version made by
+  global_header.insert(global_header.end(),local_header.begin()+4,local_header.begin()+30);
+  global_header += (uint16_t) 0; //file comment length
+  global_header += (uint16_t) 0; //disk number where file starts
+  global_header += (uint16_t) 0; //internal file attributes
+  global_header += (uint32_t) 0; //external file attributes
+  global_header += (uint32_t) global_header_offset; //relative offset of local file header, since it begins where the global header used to begin
+  global_header += fname;
+
+  //build footer
+  std::vector<char> footer;
+  footer += "PK"; //first part of sig
+  footer += (uint16_t) 0x0605; //second part of sig
+  footer += (uint16_t) 0; //number of this disk
+  footer += (uint16_t) 0; //disk where footer starts
+  footer += (uint16_t) (nrecs+1); //number of records on this disk
+  footer += (uint16_t) (nrecs+1); //total number of records
+  footer += (uint32_t) global_header.size(); //nbytes of global headers
+  footer += (uint32_t) (global_header_offset + nbytes + local_header.size()); //offset of start of global headers, since global header now starts after newly written array
+  footer += (uint16_t) 0; //zip file comment length
+
+  //write everything
+  fwrite(&local_header[0],sizeof(char),local_header.size(),fp);
+  fwrite(&npy_header[0],sizeof(char),npy_header.size(),fp);
+  fwrite(&raw_data[0],sizeof(char),total_bytes,fp);
+  fwrite(&global_header[0],sizeof(char),global_header.size(),fp);
+  fwrite(&footer[0],sizeof(char),footer.size(),fp);
+  fclose(fp);
+}
+std::vector<char> cnpy::create_string_npy_header(const std::vector<size_t>& str_lens) {
+
+  // str_lens is every len of string, calculate the max len of all string
+  size_t max_len = *std::max_element(str_lens.begin(), str_lens.end());
+
+  std::string dict_str;
+  dict_str += "{'descr': '";
+  dict_str += "|";
+  dict_str += "S";
+  dict_str += std::to_string(max_len);
+  dict_str += "', 'fortran_order': False, 'shape': (";
+  // 添加形状维度
+  dict_str += std::to_string(str_lens.size());
+
+  // 一维数组需要额外逗号, string传入时str_lens必为一维数组
+  dict_str += ",";
+
+  dict_str += "), }";
+
+  // 2. 计算填充：使 (前缀 + 字典 + 换行符) 长度为16的倍数
+  // 前缀 = 魔术值(6字节) + 版本号(2字节) + 头部长度(2字节) = 10字节
+  size_t PREFIX_LEN = 10;
+  size_t ALIGNMENT = 64;
+
+  // 总长度 = 前缀(10) + 字典长度 + 换行符(1)
+  size_t total_len = PREFIX_LEN + dict_str.size() + 1;
+  size_t padding = ALIGNMENT - (total_len % ALIGNMENT);
+
+  // 添加填充空格（保留最后位置给换行符）
+  dict_str.append(padding, ' ');
+  dict_str += '\n';  // 以换行符结束
+
+  // 3. 构建完整头部
+  std::vector<char> header;
+
+  // 魔术值 (0x93 + "NUMPY")
+  header.push_back(static_cast<char>(0x93));
+  header.insert(header.end(), {'N', 'U', 'M', 'P', 'Y'});
+
+  // 版本号 (1.0)
+  header.push_back(0x01);  // 主版本
+  header.push_back(0x00);  // 次版本
+
+  // 头部长度 (小端序)
+  uint16_t header_len = static_cast<uint16_t>(dict_str.size());
+  header.push_back(static_cast<char>(header_len & 0xFF));      // 低位字节
+  header.push_back(static_cast<char>((header_len >> 8) & 0xFF)); // 高位字节
+
+  // 添加字典内容
+  header.insert(header.end(), dict_str.begin(), dict_str.end());
+
+  return header;
+}
+
 
 

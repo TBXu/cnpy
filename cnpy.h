@@ -6,10 +6,12 @@
 #define LIBCNPY_H_
 
 #include<string>
+#include <cstring>
 #include<stdexcept>
 #include<sstream>
 #include<vector>
 #include<cstdio>
+#include <cstdint>
 #include<typeinfo>
 #include<iostream>
 #include<cassert>
@@ -18,6 +20,7 @@
 #include<memory>
 #include<stdint.h>
 #include<numeric>
+#include <algorithm>
 
 namespace cnpy {
 
@@ -68,6 +71,8 @@ namespace cnpy {
     void parse_npy_header(FILE* fp,size_t& word_size, std::vector<size_t>& shape, bool& fortran_order);
     void parse_npy_header(unsigned char* buffer,size_t& word_size, std::vector<size_t>& shape, bool& fortran_order);
     void parse_zip_footer(FILE* fp, uint16_t& nrecs, size_t& global_header_size, size_t& global_header_offset);
+    std::vector<char> create_string_npy_header(const std::vector<size_t>& str_lens);
+    void npz_save_string(std::string zipname, std::string fname, void* data, const std::vector<size_t>& str_lens, std::string mode = "w");
     npz_t npz_load(std::string fname);
     NpyArray npz_load(std::string fname, std::string varname);
     NpyArray npy_load(std::string fname);
@@ -83,6 +88,8 @@ namespace cnpy {
 
     template<> std::vector<char>& operator+=(std::vector<char>& lhs, const std::string rhs);
     template<> std::vector<char>& operator+=(std::vector<char>& lhs, const char* rhs);
+
+
 
 
     template<typename T> void npy_save(std::string fname, const T* data, const std::vector<size_t> shape, std::string mode = "w") {
@@ -169,7 +176,9 @@ namespace cnpy {
 
         //get the CRC of the data to be added
         uint32_t crc = crc32(0L,(uint8_t*)&npy_header[0],npy_header.size());
-        crc = crc32(crc,(uint8_t*)data,nels*sizeof(T));
+        if(nels>0) {
+          crc = crc32(crc,(uint8_t*)data,nels*sizeof(T));
+        }
 
         //build the local header
         std::vector<char> local_header;
@@ -220,6 +229,7 @@ namespace cnpy {
         fclose(fp);
     }
 
+
     template<typename T> void npy_save(std::string fname, const std::vector<T> data, std::string mode = "w") {
         std::vector<size_t> shape;
         shape.push_back(data.size());
@@ -233,35 +243,48 @@ namespace cnpy {
     }
 
     template<typename T> std::vector<char> create_npy_header(const std::vector<size_t>& shape) {  
-
-        std::vector<char> dict;
-        dict += "{'descr': '";
-        dict += BigEndianTest();
-        dict += map_type(typeid(T));
-        dict += std::to_string(sizeof(T));
-        dict += "', 'fortran_order': False, 'shape': (";
-        dict += std::to_string(shape[0]);
+        std::string dict_str;
+        dict_str += "{'descr': '";
+        dict_str += BigEndianTest();
+        dict_str += map_type(typeid(T));
+        dict_str += std::to_string(sizeof(T));
+        dict_str += "', 'fortran_order': False, 'shape': (";
+        // 添加形状维度
+        dict_str += std::to_string(shape[0]);
         for(size_t i = 1;i < shape.size();i++) {
-            dict += ", ";
-            dict += std::to_string(shape[i]);
+            dict_str += ", ";
+            dict_str += std::to_string(shape[i]);
         }
-        if(shape.size() == 1) dict += ",";
-        dict += "), }";
-        //pad with spaces so that preamble+dict is modulo 16 bytes. preamble is 10 bytes. dict needs to end with \n
-        int remainder = 16 - (10 + dict.size()) % 16;
-        dict.insert(dict.end(),remainder,' ');
-        dict.back() = '\n';
+        // 一维数组需要额外逗号, string传入时str_lens必为一维数组
+        dict_str += ",";
+
+        dict_str += "), }";
+
+        // 2. 计算填充：使 (前缀 + 字典 + 换行符) 长度为16的倍数
+        // 前缀 = 魔术值(6字节) + 版本号(2字节) + 头部长度(2字节) = 10字节
+        size_t PREFIX_LEN = 10;
+        size_t ALIGNMENT = 64;
+
+        // 总长度 = 前缀(10) + 字典长度 + 换行符(1)
+        size_t total_len = PREFIX_LEN + dict_str.size() + 1;
+        size_t padding = ALIGNMENT - (total_len % ALIGNMENT);
+
+        // 添加填充空格（保留最后位置给换行符）
+        dict_str.append(padding, ' ');
+        dict_str += '\n';  // 以换行符结束
 
         std::vector<char> header;
         header += (char) 0x93;
         header += "NUMPY";
         header += (char) 0x01; //major version of numpy format
         header += (char) 0x00; //minor version of numpy format
-        header += (uint16_t) dict.size();
-        header.insert(header.end(),dict.begin(),dict.end());
+        header += (uint16_t) dict_str.size();
+        header.insert(header.end(),dict_str.begin(),dict_str.end());
 
         return header;
     }
+
+
 
 
 }
