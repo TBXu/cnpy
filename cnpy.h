@@ -72,7 +72,9 @@ namespace cnpy {
     void parse_npy_header(unsigned char* buffer,size_t& word_size, std::vector<size_t>& shape, bool& fortran_order);
     void parse_zip_footer(FILE* fp, uint16_t& nrecs, size_t& global_header_size, size_t& global_header_offset);
     std::vector<char> create_string_npy_header(const std::vector<size_t>& str_lens);
+    std::vector<char> create_special_npy_header(const std::vector<size_t>& shape, std::string endian, std::string dtype, std::string dsize);
     void npz_save_string(std::string zipname, std::string fname, void* data, const std::vector<size_t>& str_lens, std::string mode = "w");
+    void npz_save_fp16(std::string zipname, std::string fname, void* data, const std::vector<size_t>& shape, std::string mode = "w");
     npz_t npz_load(std::string fname);
     NpyArray npz_load(std::string fname, std::string varname);
     NpyArray npy_load(std::string fname);
